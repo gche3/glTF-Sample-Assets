@@ -1,0 +1,66 @@
+name: Trigger Unity for changed GLB files
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.glb'
+
+jobs:
+  notify-unity:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed .glb files
+        id: glb
+        shell: bash
+        run: |
+          changed_files=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" | grep -E '\.glb$' || true)
+
+          if [ -z "$changed_files" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "files<<EOF"
+            echo "$changed_files"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Unity webhook for each changed .glb
+        if: steps.glb.outputs.found == 'true'
+        shell: bash
+        env:
+          UNITY_URL: https://automation.services.api.unity.com/v1/organizations/1375943975025/projects/b030257e-55f1-4f24-9163-39af3266081a/automations/{automationId}/webhook
+          UNITY_TOKEN: ${{ secrets.UNITY_SERVICE_TOKEN }}
+          FILES: ${{ steps.glb.outputs.files }}
+        run: |
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            file_name=$(basename "$file" .glb)
+
+            json_payload=$(jq -n \
+              --arg fullPath "$file" \
+              --arg fileName "$file_name" \
+              '{
+                fullPath: $fullPath,
+                fileName: $fileName
+              }')
+
+            echo "Triggering Unity for: $file"
+            curl --fail -X POST "$UNITY_URL" \
+              -H "Authorization: Bearer $UNITY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$json_payload"
+
+          done <<< "$FILES"
