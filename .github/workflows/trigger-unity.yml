@@ -1,4 +1,4 @@
-name: Trigger Unity for changed GLB files
+name: Upload changed GLB files to Unity Asset Manager
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
       - '**/*.glb'
 
 jobs:
-  notify-unity:
+  upload-to-uam:
     runs-on: ubuntu-latest
 
     steps:
@@ -36,31 +36,125 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Trigger Unity webhook for each changed .glb
+      - name: Create asset, create file, and upload each .glb
         if: steps.glb.outputs.found == 'true'
         shell: bash
         env:
-          UNITY_URL: https://automation.services.api.unity.com/v1/organizations/1375943975025/projects/b030257e-55f1-4f24-9163-39af3266081a/automations/{automationId}/webhook
           UNITY_TOKEN: ${{ secrets.UNITY_SERVICE_TOKEN }}
           FILES: ${{ steps.glb.outputs.files }}
+          PROJECT_ID: b030257e-55f1-4f24-9163-39af3266081a
         run: |
+          set -euo pipefail
+
+          CREATE_ASSET_URL="https://services.api.unity.com/assets/v1/projects/${PROJECT_ID}/assets"
+
           while IFS= read -r file; do
             [ -z "$file" ] && continue
 
-            file_name=$(basename "$file" .glb)
+            if [ ! -f "$file" ]; then
+              echo "File not found in checkout: $file"
+              exit 1
+            fi
 
-            json_payload=$(jq -n \
-              --arg fullPath "$file" \
-              --arg fileName "$file_name" \
+            file_name=$(basename "$file" .glb)
+            file_base=$(basename "$file")
+            file_size=$(stat -c%s "$file")
+
+            echo "Processing: $file"
+            echo "Asset name: $file_name"
+            echo "File size: $file_size"
+
+            # Step 1: Create asset
+            asset_payload=$(jq -n \
+              --arg name "$file_name" \
+              --arg description "Created from GitHub update for $file" \
               '{
-                fullPath: $fullPath,
-                fileName: $fileName
+                name: $name,
+                description: $description,
+                tags: ["github", "glb"],
+                primaryType: "3D Model"
               }')
 
-            echo "Triggering Unity for: $file"
-            curl --fail -X POST "$UNITY_URL" \
+            asset_response=$(curl --fail -sS -X POST "$CREATE_ASSET_URL" \
               -H "Authorization: Bearer $UNITY_TOKEN" \
               -H "Content-Type: application/json" \
-              -d "$json_payload"
+              -d "$asset_payload")
+
+            echo "Asset response: $asset_response"
+            echo "Datasets returned:"
+            echo "$asset_response" | jq '.datasets'
+
+            asset_id=$(echo "$asset_response" | jq -r '.assetId')
+            asset_version=$(echo "$asset_response" | jq -r '.assetVersion')
+
+            if [ -z "$asset_id" ] || [ "$asset_id" = "null" ]; then
+              echo "Failed to get assetId from response"
+              exit 1
+            fi
+
+            if [ -z "$asset_version" ] || [ "$asset_version" = "null" ]; then
+              echo "Failed to get assetVersion from response"
+              exit 1
+            fi
+
+            # Try to pick the source dataset first, otherwise fall back to the first dataset
+            dataset_id=$(echo "$asset_response" | jq -r '
+              (
+                .datasets[]
+                | select(
+                    (.name | ascii_downcase | contains("source")) or
+                    ((.systemTags // []) | map(ascii_downcase) | any(contains("source")))
+                  )
+                | .datasetId
+              ) // .datasets[0].datasetId
+            ')
+
+            if [ -z "$dataset_id" ] || [ "$dataset_id" = "null" ]; then
+              echo "Failed to get datasetId from response"
+              exit 1
+            fi
+
+            echo "Created assetId: $asset_id"
+            echo "Asset version: $asset_version"
+            echo "Dataset ID: $dataset_id"
+
+            # Step 2: Create file entry
+            create_file_url="https://services.api.unity.com/assets/v1/projects/${PROJECT_ID}/assets/${asset_id}/versions/${asset_version}/datasets/${dataset_id}/files"
+
+            file_payload=$(jq -n \
+              --arg filePath "$file" \
+              --arg description "Uploaded from GitHub for $file_name" \
+              --arg fileSize "$file_size" \
+              '{
+                filePath: $filePath,
+                description: $description,
+                tags: ["github", "glb"],
+                fileSize: ($fileSize | tonumber),
+                mainFile: true,
+                createEvenIfFrozen: true
+              }')
+
+            file_response=$(curl --fail -sS -X POST "$create_file_url" \
+              -H "Authorization: Bearer $UNITY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "$file_payload")
+
+            echo "File response: $file_response"
+
+            upload_url=$(echo "$file_response" | jq -r '.uploadUrl')
+
+            if [ -z "$upload_url" ] || [ "$upload_url" = "null" ]; then
+              echo "Failed to get uploadUrl from file response"
+              exit 1
+            fi
+
+            # Step 3: Upload bytes to returned blob URL
+            echo "Uploading file bytes for $file_base"
+            curl --fail -sS -X PUT "$upload_url" \
+              -H "x-ms-blob-type: BlockBlob" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$file"
+
+            echo "Upload complete for: $file"
 
           done <<< "$FILES"
