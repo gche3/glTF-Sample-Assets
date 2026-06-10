@@ -40,12 +40,14 @@ jobs:
         if: steps.glb.outputs.found == 'true'
         shell: bash
         env:
-          UNITY_TOKEN: ${{ secrets.UNITY_SERVICE_TOKEN }}
+          UNITY_KEY_ID: ${{ secrets.UNITY_KEY_ID }}
+          UNITY_SECRET_KEY: ${{ secrets.UNITY_SECRET_KEY }}
           FILES: ${{ steps.glb.outputs.files }}
           PROJECT_ID: b030257e-55f1-4f24-9163-39af3266081a
         run: |
           set -euo pipefail
 
+          AUTH_HEADER=$(printf "%s:%s" "$UNITY_KEY_ID" "$UNITY_SECRET_KEY" | base64 | tr -d '\n')
           CREATE_ASSET_URL="https://services.api.unity.com/assets/v1/projects/${PROJECT_ID}/assets"
 
           while IFS= read -r file; do
@@ -76,7 +78,7 @@ jobs:
               }')
 
             asset_response=$(curl --fail -sS -X POST "$CREATE_ASSET_URL" \
-              -H "Authorization: Bearer $UNITY_TOKEN" \
+              -H "Authorization: Basic $AUTH_HEADER" \
               -H "Content-Type: application/json" \
               -d "$asset_payload")
 
@@ -97,7 +99,6 @@ jobs:
               exit 1
             fi
 
-            # Try to pick the source dataset first, otherwise fall back to the first dataset
             dataset_id=$(echo "$asset_response" | jq -r '
               (
                 .datasets[]
@@ -135,7 +136,7 @@ jobs:
               }')
 
             file_response=$(curl --fail -sS -X POST "$create_file_url" \
-              -H "Authorization: Bearer $UNITY_TOKEN" \
+              -H "Authorization: Basic $AUTH_HEADER" \
               -H "Content-Type: application/json" \
               -d "$file_payload")
 
