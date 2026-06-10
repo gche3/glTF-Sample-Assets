@@ -43,7 +43,7 @@ jobs:
           UNITY_KEY_ID: ${{ secrets.UNITY_KEY_ID }}
           UNITY_SECRET_KEY: ${{ secrets.UNITY_SECRET_KEY }}
           FILES: ${{ steps.glb.outputs.files }}
-          PROJECT_ID: b030257e-55f1-4f24-9163-39af3266081a
+          PROJECT_ID: ${{ secrets.UNITY_PROJECT_ID }}
         run: |
           set -euo pipefail
 
